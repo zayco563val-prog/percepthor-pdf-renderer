@@ -1,8 +1,15 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
+
+const browser = await puppeteer.launch({
+  args: chromium.args,
+  executablePath: await chromium.executablePath(),
+  headless: chromium.headless
+});
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 const parseBearerToken = (token) => {
   if (!token) return null;
@@ -11,7 +18,7 @@ const parseBearerToken = (token) => {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
-const waitForNetworkIdle = async (page, idleTime = 1000, maxWait = 15000) => {
+const waitForNetworkIdle = async (page, idleTime = 1000, maxWait = 30000) => {
   let pendingRequests = 0;
   let resolveIdle;
   let timeoutId;
@@ -41,8 +48,6 @@ const waitForNetworkIdle = async (page, idleTime = 1000, maxWait = 15000) => {
   page.on('requestfinished', onRequestComplete);
   page.on('requestfailed', onRequestComplete);
 
-  maxWaitId = setTimeout(() => resolveIdle(false), maxWait);
-
   return new Promise((resolve) => {
     resolveIdle = (success) => {
       cleanup();
@@ -53,13 +58,14 @@ const waitForNetworkIdle = async (page, idleTime = 1000, maxWait = 15000) => {
         resolveIdle(true);
       }
     }, idleTime);
+    maxWaitId = setTimeout(() => resolveIdle(false), maxWait);
   });
 };
 
 app.get('/pdf', async (req, res) => {
   const { url, token, wait } = req.query;
   const bearerToken = parseBearerToken(token);
-  const waitMs = clamp(parseInt(wait, 10) || 7000, 5000, 15000);
+  const waitMs = clamp(parseInt(wait, 10) || 7000, 5000, 30000);
 
   if (!url) {
     console.error('Missing URL parameter');
@@ -76,11 +82,18 @@ app.get('/pdf', async (req, res) => {
 
   let browser;
   try {
+    console.log('Launching Puppeteer browser...');
+    console.log('Using executablePath:', process.env.PUPPETEER_EXECUTABLE_PATH || 'bundled');
+
     browser = await puppeteer.launch({
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      headless: 'new',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     });
+    console.log('Puppeteer launched successfully.');
 
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(30000);
     await page.setExtraHTTPHeaders({ Authorization: bearerToken });
 
     await page.goto(url, {
