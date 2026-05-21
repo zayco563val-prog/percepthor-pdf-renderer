@@ -1,20 +1,13 @@
 {
   "name": "percepthor-pdf-renderer",
   "version": "1.0.0",
-  "type": "module",
   "main": "server.js",
-  "engines": {
-    "node": "18.x"
-  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "express": "^4.18.2",
     "puppeteer": "^22.0.0"
-  },
-  "scripts": {
-    "start": "node server.js",
-    "postinstall": "npx puppeteer browsers install chrome"
   }
 }
