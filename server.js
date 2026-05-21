@@ -9,7 +9,7 @@ app.get('/', (req, res) => {
   res.send('Servidor OK');
 });
 
-// 🔥 RUTA PDF (LA QUE TE FALTA)
+// Ruta PDF
 app.get('/pdf', async (req, res) => {
   const { url, token, wait } = req.query;
 
@@ -27,12 +27,13 @@ app.get('/pdf', async (req, res) => {
     console.log('Generando PDF de:', url);
 
     browser = await puppeteer.launch({
+      executablePath: puppeteer.executablePath(), // 🔥 CLAVE
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
     const page = await browser.newPage();
 
-    // 🔐 INYECTAR TOKEN
+    // 🔐 Inyectar token
     await page.setExtraHTTPHeaders({
       Authorization: token
     });
@@ -42,19 +43,22 @@ app.get('/pdf', async (req, res) => {
       timeout: 0
     });
 
-    console.log('Esperando render completo:', extraWait);
+    console.log('Esperando render:', extraWait);
 
-    await new Promise(r => setTimeout(r, extraWait));
+    // Espera adicional
+    await new Promise(resolve => setTimeout(resolve, extraWait));
 
     // Esperar imágenes
     await page.evaluate(async () => {
-      const imgs = Array.from(document.images);
-      await Promise.all(imgs.map(img => {
-        if (img.complete) return;
-        return new Promise(res => {
-          img.onload = img.onerror = res;
-        });
-      }));
+      const images = Array.from(document.images);
+      await Promise.all(
+        images.map(img => {
+          if (img.complete) return;
+          return new Promise(resolve => {
+            img.onload = img.onerror = resolve;
+          });
+        })
+      );
     });
 
     const pdf = await page.pdf({
@@ -70,7 +74,7 @@ app.get('/pdf', async (req, res) => {
     res.send(pdf);
 
   } catch (error) {
-    console.error('Error PDF:', error);
+    console.error('Error:', error);
 
     res.status(500).json({
       error: 'Error generando PDF',
