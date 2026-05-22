@@ -2,81 +2,178 @@
 const express = require('express');
 const puppeteer = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 app.get('/', (req, res) => {
   res.send('Servidor OK');
 });
 
+async function getChromiumExecutablePathCopy() {
+  const sourcePath = await chromium.executablePath();
+  const targetPath = path.join(
+    os.tmpdir(),
+    `chromium-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  fs.copyFileSync(sourcePath, targetPath);
+  fs.chmodSync(targetPath, 0o755);
+
+  return targetPath;
+}
+
+async function launchBrowserSafe() {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const executablePath = await getChromiumExecutablePathCopy();
+
+    try {
+      const browser = await puppeteer.launch({
+        executablePath,
+        args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
+        headless: chromium.headless,
+        ignoreHTTPSErrors: true
+      });
+
+      return browser;
+    } catch (error) {
+      lastError = error;
+      const message = String(error && error.message ? error.message : error);
+
+      if (!message.includes('ETXTBSY') || attempt === 2) {
+        throw error;
+      }
+
+      await delay(1200);
+    }
+  }
+
+  throw lastError;
+}
+
 app.get('/pdf', async (req, res) => {
   const { url, token, wait } = req.query;
+
   if (!url || !token) {
-    return res.status(400).json({ error: 'Faltan parámetros: url y token' });
+    return res.status(400).json({
+      error: 'Faltan parámetros: url y token'
+    });
   }
-  const extraWait = parseInt(wait || '8000', 10);
+
+  const extraWait = Number.parseInt(wait || '8000', 10) || 8000;
   let browser;
 
   try {
     console.log('Generando PDF de:', url);
-    browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
-      executablePath: await chromium.executablePath(),
-      headless: true
-    });
+
+    browser = await launchBrowserSafe();
 
     const page = await browser.newPage();
-    // Inyectar token en headers
-    await page.setExtraHTTPHeaders({ Authorization: token });
 
-    // Navegar y esperar carga completa
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.setViewport({
+      width: 1280,
+      height: 1800
+    });
 
-    // Esperar enlace de descarga (botón) que la página crea dinámicamente
-    await page.waitForSelector('a[download]', { visible: true, timeout: 30000 });
-    console.log('Enlace de descarga encontrado');
+    await page.setDefaultTimeout(60000);
+    await page.setDefaultNavigationTimeout(60000);
 
-    // Pequeña espera adicional por si hay animaciones o delays
-    await new Promise(r => setTimeout(r, extraWait));
+    // Percepthor usa header y cookie; dejamos ambos para máxima compatibilidad.
+    await page.setExtraHTTPHeaders({
+      authorization: token,
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    });
 
-    // Dentro del contexto del navegador, usar fetch para descargar el Blob y convertirlo a base64
-    const fileBase64 = await page.evaluate(async () => {
+    const targetUrl = new URL(url);
+    await page.setCookie({
+      name: 'percepthor-jwt',
+      value: token,
+      domain: targetUrl.hostname,
+      path: '/',
+      secure: true,
+      httpOnly: false
+    });
+
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
+
+    // La página crea el PDF como blob + anchor de descarga.
+    await page.waitForFunction(() => {
       const a = document.querySelector('a[download]');
-      const href = a ? a.href : null;
-      if (!href) throw new Error('Enlace de descarga no disponible');
+      return Boolean(a && a.href && a.href.startsWith('blob:'));
+    }, { timeout: 60000 });
+
+    await delay(extraWait);
+
+    const payload = await page.evaluate(async () => {
+      const anchor =
+        document.querySelector('a[download][href^="blob:"]') ||
+        document.querySelector('a[download]');
+
+      if (!anchor) {
+        throw new Error('No se encontró el enlace de descarga');
+      }
+
+      const href = anchor.href || anchor.getAttribute('href');
+      if (!href) {
+        throw new Error('El enlace de descarga no tiene href');
+      }
+
       const response = await fetch(href);
-      if (!response.ok) throw new Error(`Fetch falló con status ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`No se pudo leer el blob: ${response.status} ${response.statusText}`);
+      }
+
       const blob = await response.blob();
-      return new Promise((resolve, reject) => {
+
+      const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onerror = () => reject('Error leyendo Blob');
-        reader.onload = () => {
-          // reader.result es "data:application/pdf;base64,...."
-          const dataUrl = reader.result;
-          const base64 = dataUrl.split(',')[1];
-          if (!base64) reject('No se pudo extraer base64');
-          else resolve(base64);
-        };
+        reader.onerror = () => reject(reader.error || new Error('Error leyendo Blob'));
+        reader.onload = () => resolve(String(reader.result || ''));
         reader.readAsDataURL(blob);
       });
+
+      const base64 = dataUrl.split(',')[1];
+      if (!base64) {
+        throw new Error('No se pudo convertir el blob a base64');
+      }
+
+      return {
+        fileName: anchor.getAttribute('download') || 'documento.pdf',
+        base64
+      };
     });
 
-    // Convertir la cadena base64 a Buffer en Node.js
-    const pdfBuffer = Buffer.from(fileBase64, 'base64');
+    const pdfBuffer = Buffer.from(payload.base64, 'base64');
 
-    // Enviar PDF como respuesta
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': 'inline; filename="documento.pdf"'
+      'Content-Disposition': `inline; filename="${String(payload.fileName).replace(/"/g, '')}"`
     });
-    res.send(pdfBuffer);
+
+    return res.send(pdfBuffer);
 
   } catch (error) {
     console.error('Error PDF:', error);
-    res.status(500).json({ error: 'Error generando PDF', details: error.message });
+
+    return res.status(500).json({
+      error: 'Error generando PDF',
+      details: error.message
+    });
+
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 });
 
