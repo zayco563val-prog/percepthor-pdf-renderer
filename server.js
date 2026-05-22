@@ -6,21 +6,29 @@ const chromium = require('@sparticuz/chromium');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Ruta base
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 app.get('/', (req, res) => {
   res.send('Servidor OK');
 });
 
-// Ruta PDF
 app.get('/pdf', async (req, res) => {
   const { url, token, wait } = req.query;
+
   if (!url || !token) {
-    return res.status(400).json({ error: 'Faltan parámetros: url y token' });
+    return res.status(400).json({
+      error: 'Faltan parámetros: url y token'
+    });
   }
-  const extraWait = parseInt(wait || '10000');
+
+  const extraWait = Number.parseInt(wait || '8000', 10);
+  const selectorTimeout = Math.max(45000, extraWait + 20000);
+
   let browser;
+
   try {
     console.log('Generando PDF de:', url);
+
     browser = await puppeteer.launch({
       args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
       executablePath: await chromium.executablePath(),
@@ -28,70 +36,92 @@ app.get('/pdf', async (req, res) => {
     });
 
     const page = await browser.newPage();
-    // Definir viewport (importante para render completo de Percepthor)
-    await page.setViewport({ width: 1280, height: 1800 });
 
-    // Inyectar token en cabeceras
-    await page.setExtraHTTPHeaders({ Authorization: token });
+    await page.setViewport({
+      width: 1280,
+      height: 1800
+    });
 
-    // Navegar a la página (espera DOMContentLoaded)
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    console.log('Esperando render base:', extraWait);
+    await page.setExtraHTTPHeaders({
+      Authorization: token
+    });
 
-    // Espera fija inicial para la carga de datos
-    await page.waitForTimeout(extraWait);
+    page.on('console', msg => console.log('PAGE:', msg.text()));
+    page.on('pageerror', err => console.log('PAGEERROR:', err.message));
 
-    // Espera condicional a que haya texto visible en el body (evitar PDF en blanco)
-    await page.waitForFunction(
-      () => document.body && document.body.innerText.trim().length > 200,
-      { timeout: 20000 }
-    );
-    console.log('Contenido cargado');
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
 
-    // Realizar *scroll* automático para cargar imágenes/elementos bajo scroll
-    await page.evaluate(async () => {
-      await new Promise((resolve) => {
-        let total = 0;
-        const distance = 200;
-        const timer = setInterval(() => {
-          window.scrollBy(0, distance);
-          total += distance;
-          if (total >= document.body.scrollHeight) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 100);
+    console.log('Esperando enlace de descarga...');
+
+    await page.waitForSelector('a[download][href^="blob:"]', {
+      timeout: selectorTimeout
+    }).catch(async () => {
+      await page.waitForSelector('a[download]', {
+        timeout: selectorTimeout
       });
     });
-    console.log('Scroll completado');
 
-    // Esperar carga de todas las imágenes
-    await page.evaluate(async () => {
-      const imgs = Array.from(document.images);
-      await Promise.all(imgs.map(img => {
-        if (img.complete) return;
-        return new Promise(res => { img.onload = img.onerror = res; });
-      }));
+    await delay(Math.min(extraWait, 10000));
+
+    const payload = await page.evaluate(async () => {
+      const anchor =
+        document.querySelector('a[download][href^="blob:"]') ||
+        document.querySelector('a[download]');
+
+      if (!anchor) {
+        throw new Error('No se encontró el enlace de descarga');
+      }
+
+      const href = anchor.href || anchor.getAttribute('href');
+      if (!href) {
+        throw new Error('El enlace de descarga no tiene href');
+      }
+
+      const filename = anchor.getAttribute('download') || 'documento.pdf';
+
+      const response = await fetch(href);
+      if (!response.ok) {
+        throw new Error(`No se pudo leer el blob: ${response.status} ${response.statusText}`);
+      }
+
+      const contentType = response.headers.get('content-type') || 'application/pdf';
+      const buffer = await response.arrayBuffer();
+
+      return {
+        filename,
+        contentType,
+        bytes: Array.from(new Uint8Array(buffer))
+      };
     });
-    console.log('Imágenes cargadas');
 
-    // (Opcional) Screenshot de depuración
-    // await page.screenshot({ path: 'debug.png', fullPage: true });
+    if (!payload?.bytes?.length) {
+      throw new Error('El PDF llegó vacío');
+    }
 
-    // Generar PDF
-    const pdf = await page.pdf({ format: 'A4', printBackground: true });
-    await browser.close();
+    const pdfBuffer = Buffer.from(payload.bytes);
 
-    // Enviar PDF al cliente
     res.set({
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': 'inline; filename="documento.pdf"'
+      'Content-Type': payload.contentType || 'application/pdf',
+      'Content-Disposition': `inline; filename="${payload.filename.replace(/"/g, '')}"`
     });
-    res.send(pdf);
+
+    return res.send(pdfBuffer);
+
   } catch (error) {
     console.error('Error PDF:', error);
-    if (browser) await browser.close();
-    res.status(500).json({ error: 'Error generando PDF', details: error.message });
+
+    return res.status(500).json({
+      error: 'Error generando PDF',
+      details: error.message
+    });
+
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 });
 
