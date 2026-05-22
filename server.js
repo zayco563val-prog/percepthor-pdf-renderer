@@ -1,5 +1,6 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -27,13 +28,14 @@ app.get('/pdf', async (req, res) => {
     console.log('Generando PDF de:', url);
 
     browser = await puppeteer.launch({
-      executablePath: puppeteer.executablePath(), // 🔥 CLAVE
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: chromium.args,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless
     });
 
     const page = await browser.newPage();
 
-    // 🔐 Inyectar token
+    // 🔐 Token
     await page.setExtraHTTPHeaders({
       Authorization: token
     });
@@ -45,17 +47,16 @@ app.get('/pdf', async (req, res) => {
 
     console.log('Esperando render:', extraWait);
 
-    // Espera adicional
-    await new Promise(resolve => setTimeout(resolve, extraWait));
+    await new Promise(r => setTimeout(r, extraWait));
 
     // Esperar imágenes
     await page.evaluate(async () => {
-      const images = Array.from(document.images);
+      const imgs = Array.from(document.images);
       await Promise.all(
-        images.map(img => {
+        imgs.map(img => {
           if (img.complete) return;
-          return new Promise(resolve => {
-            img.onload = img.onerror = resolve;
+          return new Promise(res => {
+            img.onload = img.onerror = res;
           });
         })
       );
@@ -74,7 +75,7 @@ app.get('/pdf', async (req, res) => {
     res.send(pdf);
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error PDF:', error);
 
     res.status(500).json({
       error: 'Error generando PDF',
