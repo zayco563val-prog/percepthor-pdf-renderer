@@ -1,110 +1,76 @@
 const express = require('express');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
 
-// Ruta base
 app.get('/', (req, res) => {
   res.send('Servidor OK');
 });
 
-// Ruta PDF
 app.get('/pdf', async (req, res) => {
   const { url, token, wait } = req.query;
 
   if (!url || !token) {
-    return res.status(400).json({
-      error: 'Faltan parámetros: url y token'
-    });
+    return res.status(400).json({ error: 'Faltan parámetros: url y token' });
   }
 
-  const extraWait = parseInt(wait || '8000');
-
-  let browser;
-
   try {
-    console.log('Generando PDF de:', url);
+    console.log('Generando PDF para:', url);
 
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless
+    const browser = await puppeteer.launch({
+      headless: 'new',
+      executablePath: puppeteer.executablePath(),
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
     const page = await browser.newPage();
 
-    // Viewport (importante para render)
-    await page.setViewport({ width: 1280, height: 1800 });
-
-    // Token
+    // 🔐 TOKEN
     await page.setExtraHTTPHeaders({
       Authorization: token
     });
 
-    // Navegar
+    // 🌐 CARGA
     await page.goto(url, {
       waitUntil: 'domcontentloaded',
-      timeout: 0
+      timeout: 60000
     });
 
-    console.log('Esperando render base:', extraWait);
+    // 🧠 ESPERA INTELIGENTE (NO DEPENDE DE SELECTOR)
+    await page.waitForFunction(() => {
+      return document.body && document.body.innerText.length > 100;
+    }, { timeout: 20000 });
 
-    // Espera base
+    // ⏳ ESPERA EXTRA (clave para Percepthor)
+    const extraWait = wait ? parseInt(wait) : 10000;
+    console.log('Esperando extra:', extraWait);
     await new Promise(r => setTimeout(r, extraWait));
 
-    // 🔥 Esperar contenido real (evita PDF en blanco)
-    await page.waitForFunction(() => {
-      return document.body && document.body.innerText.trim().length > 200;
-    }, { timeout: 15000 });
-
-    console.log('Contenido detectado');
-
-    // Esperar imágenes
-    await page.evaluate(async () => {
-      const imgs = Array.from(document.images);
-      await Promise.all(
-        imgs.map(img => {
-          if (img.complete) return;
-          return new Promise(res => {
-            img.onload = img.onerror = res;
-          });
-        })
-      );
-    });
-
-    console.log('Imágenes cargadas');
-
-    // (Opcional) screenshot para debug
-    // await page.screenshot({ path: 'debug.png', fullPage: true });
-
-    // Generar PDF
+    // 📄 PDF
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true
     });
 
+    await browser.close();
+
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': 'inline; filename="documento.pdf"'
+      'Content-Disposition': 'inline; filename="output.pdf"'
     });
 
     res.send(pdf);
 
   } catch (error) {
-    console.error('Error PDF:', error);
-
+    console.error('Error:', error);
     res.status(500).json({
       error: 'Error generando PDF',
       details: error.message
     });
-
-  } finally {
-    if (browser) await browser.close();
   }
 });
 
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
