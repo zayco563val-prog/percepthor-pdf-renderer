@@ -2,11 +2,11 @@
   "name": "percepthor-pdf-renderer",
   "version": "1.0.0",
   "main": "server.js",
+  "engines": {              // Forzar Node 18.x en Render【18†L213-L221】
+    "node": ">=18.0.0 <19.0.0"
+  },
   "scripts": {
     "start": "node server.js"
-  },
-  "engines": {
-    "node": "18.x"
   },
   "dependencies": {
     "express": "^4.18.2",
