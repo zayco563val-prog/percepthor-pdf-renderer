@@ -35,19 +35,31 @@ app.get('/pdf', async (req, res) => {
 
     const page = await browser.newPage();
 
-    // 🔐 Token
+    // Viewport (importante para render)
+    await page.setViewport({ width: 1280, height: 1800 });
+
+    // Token
     await page.setExtraHTTPHeaders({
       Authorization: token
     });
 
+    // Navegar
     await page.goto(url, {
-      waitUntil: 'networkidle2',
+      waitUntil: 'domcontentloaded',
       timeout: 0
     });
 
-    console.log('Esperando render:', extraWait);
+    console.log('Esperando render base:', extraWait);
 
+    // Espera base
     await new Promise(r => setTimeout(r, extraWait));
+
+    // 🔥 Esperar contenido real (evita PDF en blanco)
+    await page.waitForFunction(() => {
+      return document.body && document.body.innerText.trim().length > 200;
+    }, { timeout: 15000 });
+
+    console.log('Contenido detectado');
 
     // Esperar imágenes
     await page.evaluate(async () => {
@@ -62,6 +74,12 @@ app.get('/pdf', async (req, res) => {
       );
     });
 
+    console.log('Imágenes cargadas');
+
+    // (Opcional) screenshot para debug
+    // await page.screenshot({ path: 'debug.png', fullPage: true });
+
+    // Generar PDF
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true
